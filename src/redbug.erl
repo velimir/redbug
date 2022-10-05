@@ -13,6 +13,7 @@
 -export([stop/0]).
 -export([dtop/0, dtop/1]).
 
+-define(TRC_NAME, redbug).
 -define(
    log(T),
    error_logger:info_report(
@@ -58,6 +59,7 @@
          file         = "",          % file to write trace msgs to
          file_size    = 1,           % file size (per file [Mb])
          file_count   = 8,           % number of files in wrap log
+         trc_name     = ?TRC_NAME,   % tracer process name
          %% internal
          trc          = [],          % cannot be set by user
          shell_pid    = [],          % cannot be set by user
@@ -167,7 +169,10 @@ dtop_cfg(Cfg) ->
 %% Stops a trace.
 %% @end
 stop() ->
-  case whereis(redbug) of
+  stop(?TRC_NAME).
+
+stop(Name) ->
+  case whereis(Name) of
     undefined -> not_started;
     Pid -> Pid ! stop, stopped
   end.
@@ -186,19 +191,20 @@ start(Trc, Props) when is_map(Props) ->
 %%% the real start function!
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 start(Trc, Props) when is_list(Props) ->
-  case whereis(redbug) of
+  TrcName = proplists:get_value(trc_name, Props, ?TRC_NAME),
+  case whereis(TrcName) of
     undefined ->
       try
         Cnf = assert_print_fun(make_cnf(Trc, [{shell_pid, self()}|Props])),
         assert_cookie(Cnf),
-        register(redbug, spawn(fun() -> init(Cnf) end)),
-        maybe_block(Cnf, block_a_little())
+        register(TrcName, spawn(fun() -> init(Cnf) end)),
+        maybe_block(Cnf, block_a_little(Cnf#cnf.trc_name))
       catch
         R   -> R;
         C:R -> {oops, {C, R}}
       end;
     _ ->
-      redbug_already_started
+      {error, {already_started, TrcName}}
   end.
 
 assert_print_fun(Cnf) ->
@@ -216,18 +222,18 @@ mk_print_fun(Cnf) ->
 assert_cookie(#cnf{cookie=''}) -> ok;
 assert_cookie(Cnf) -> erlang:set_cookie(Cnf#cnf.target, Cnf#cnf.cookie).
 
-block_a_little() ->
-  Ref = erlang:monitor(process, redbug),
+block_a_little(TrcName) ->
+  Ref = erlang:monitor(process, TrcName),
   receive
     {running, NoP, NoF}  -> erlang:demonitor(Ref), {NoP, NoF};
     {'DOWN', Ref, _, _, R} -> R
   end.
 
-maybe_block(#cnf{blocking=true}, {I, _}) when is_integer(I) -> block();
+maybe_block(#cnf{blocking=true, trc_name=TrcName}, {I, _}) when is_integer(I) -> block(TrcName);
 maybe_block(_, R) -> R.
 
-block() ->
-  Ref = erlang:monitor(process, redbug),
+block(TrcName) ->
+  Ref = erlang:monitor(process, TrcName),
   receive
     {'DOWN', Ref, _, _, R} -> R
   end.
@@ -298,9 +304,9 @@ wait_for_printer(#cnf{print_pid=PrintPid}) ->
     {'EXIT', PrintPid, R} -> R
   end.
 
-done(#cnf{blocking=false}, {Reason, Answer}) ->
+done(#cnf{blocking=false, trc_name=TrcName}, {Reason, Answer}) ->
   io:fwrite("~s", [done_string(Reason)]),
-  io:fwrite("redbug done, ~p - ~p~n", [Reason, Answer]);
+  io:fwrite("~p done, ~p - ~p~n", [TrcName, Reason, Answer]);
 done(#cnf{blocking=true}, Answer) ->
   exit(Answer).
 
@@ -454,12 +460,12 @@ improper_map(F, [A|B]) -> [F(A)|improper_map(F, B)].
 %% we assert that the file can be created here (in the redbug proc),
 %% but we don't actually open the file until we run the fun (in the
 %% printer proc).
-mk_out(#cnf{print_re=RE, print_file=File}) ->
+mk_out(#cnf{print_re=RE, print_file=File, trc_name=TrcName}) ->
   assert_dir(File),
   fun(F, A) ->
       Str=flat(F, A),
       case RE =:= "" orelse re:run(Str, RE) =/= nomatch of
-        true  -> io:fwrite(get_fd(File), "~s~n", [Str]);
+        true  -> io:fwrite(get_fd(TrcName, File), "~s~n", [Str]);
         false -> ok
       end
   end.
@@ -620,13 +626,13 @@ maybe_exit(State, PrintFun, Acc) ->
   end.
 
 %% this is called from the default PrintFun
-get_fd("") ->
+get_fd(_TrcName, "") ->
   standard_io;
-get_fd(FN) ->
-  case get(redbug_fd) of
+get_fd(TrcName, FN) ->
+  case get({TrcName, redbug_fd}) of
     undefined ->
       case file:open(FN, [write]) of
-        {ok, FD} -> put(redbug_fd, FD), FD;
+        {ok, FD} -> put({TrcName, redbug_fd}, FD), FD;
         _ -> throw({cannot_open, FN})
       end;
     FD -> FD
