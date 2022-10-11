@@ -10,7 +10,7 @@
 
 -export([help/0]).
 -export([start/1, start/2]).
--export([stop/0]).
+-export([stop/0, stop/1]).
 -export([dtop/0, dtop/1]).
 
 -define(TRC_NAME, redbug).
